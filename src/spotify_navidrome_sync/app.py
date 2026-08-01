@@ -137,7 +137,7 @@ def _sync_playlist(
     if source.cleanup_downloads and directory is not None and source.download_target is not None:
         deleted = cleanup_manifest_files(
             directory,
-            _manifest_keep_spotify_ids(plan.matches, source.download_target),
+            {track.spotify_id for track in playlist.tracks if track.spotify_id is not None},
         )
         if deleted:
             _scan(navidrome, runtime=runtime, reason="after cleaning up downloaded tracks")
@@ -195,22 +195,6 @@ def _scan(navidrome: NavidromeClient, *, runtime: RuntimeConfig, reason: str) ->
     navidrome.start_scan()
     navidrome.wait_for_scan_completion(timeout_seconds=runtime.navidrome_scan_timeout_seconds)
     LOGGER.info("Navidrome scan completed %s", reason)
-
-
-def _manifest_keep_spotify_ids(matches: tuple[TrackMatch, ...], download_target: str) -> set[str]:
-    keep: set[str] = set()
-    rip_prefix = f"/music/rip/{download_target}/"
-    for match in matches:
-        spotify_id = match.spotify_track.spotify_id
-        if spotify_id is None:
-            continue
-        if match.matched_song is None:
-            keep.add(spotify_id)
-            continue
-        path = match.matched_song.raw.get("path")
-        if isinstance(path, str) and path.startswith(rip_prefix):
-            keep.add(spotify_id)
-    return keep
 
 
 def _configure_logging(level: str) -> None:

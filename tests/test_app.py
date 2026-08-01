@@ -7,7 +7,7 @@ from typing import cast
 from spotify_navidrome_sync.app import _sync_playlist
 from spotify_navidrome_sync.config import RuntimeConfig, SourceConfig
 from spotify_navidrome_sync.downloader import SpotdlDownloader
-from spotify_navidrome_sync.manifest import ManifestEntry, load_manifest
+from spotify_navidrome_sync.manifest import ManifestEntry, load_manifest, write_manifest
 from spotify_navidrome_sync.navidrome import NavidromeClient, NavidromePlaylist, NavidromeSong
 from spotify_navidrome_sync.spotify import SpotifyPlaylist, SpotifyTrack
 
@@ -30,7 +30,7 @@ class FakeNavidrome:
                 120,
                 "mp3",
                 ("NO1234567890",),
-                {"path": "/music/rip/small-test/Artist_-_Song_-_spotify-track.mp3"},
+                {"path": "small-test/Artist_-_Song_-_spotify-track.mp3"},
             ),
         )
 
@@ -66,7 +66,7 @@ class FakeDownloader(SpotdlDownloader):
         target_dir: Path,
     ) -> tuple[ManifestEntry, ...]:
         self.downloaded.extend(track.spotify_id or "" for track in tracks)
-        target_dir.mkdir(parents=True)
+        target_dir.mkdir(parents=True, exist_ok=True)
         path = target_dir / "Artist_-_Song_-_spotify-track.mp3"
         path.write_text("downloaded", encoding="utf-8")
         return (
@@ -113,6 +113,22 @@ def test_sync_playlist_downloads_scans_rematches_then_replaces_playlist(tmp_path
         download_root=tmp_path,
         navidrome_scan_timeout_seconds=7,
     )
+    target = tmp_path / "small-test"
+    target.mkdir()
+    stale_path = target / "Stale_-_Song_-_stale-track.mp3"
+    stale_path.write_text("stale", encoding="utf-8")
+    write_manifest(
+        target,
+        (
+            ManifestEntry(
+                "stale-track",
+                None,
+                "Stale",
+                "Song",
+                stale_path,
+            ),
+        ),
+    )
 
     _sync_playlist(
         cast(NavidromeClient, navidrome),
@@ -130,7 +146,9 @@ def test_sync_playlist_downloads_scans_rematches_then_replaces_playlist(tmp_path
         "wait_scan:7",
         "search:Artist Song",
         "replace:Small Downloader Test",
+        "start_scan",
+        "wait_scan:7",
     ]
-    assert [entry.spotify_id for entry in load_manifest(tmp_path / "small-test")] == [
-        "spotify-track"
-    ]
+    assert [entry.spotify_id for entry in load_manifest(target)] == ["spotify-track"]
+    assert (target / "Artist_-_Song_-_spotify-track.mp3").exists()
+    assert not stale_path.exists()
