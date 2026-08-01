@@ -1,8 +1,39 @@
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:f5b485ea962d9bd1186b2f6b3a061191539b905b82ec395de78cbfae51f20e35
+# syntax=docker/dockerfile:1.26.0
 
-LABEL org.opencontainers.image.title="repo-operations"
-LABEL org.opencontainers.image.description="https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
+
+FROM python:3.12-slim-bookworm@sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b
+
+LABEL org.opencontainers.image.title="spotify-navidrome-sync"
+LABEL org.opencontainers.image.description="One-shot Spotify playlist to Navidrome playlist sync job"
+
+ENV HOME=/tmp \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+WORKDIR /app
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+RUN groupadd --system --gid 1000 app \
+    && useradd --system --uid 1000 --gid 1000 --home-dir /tmp --shell /usr/sbin/nologin app
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+
+RUN uv sync --frozen --no-dev --no-editable \
+    && rm -rf /usr/local/lib/python3.12/site-packages/pip \
+        /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
+        /usr/local/bin/pip \
+        /usr/local/bin/pip3 \
+        /usr/local/bin/pip3.12 \
+        /tmp/.cache/uv \
+    && chown -R app:app /app /tmp
 
 HEALTHCHECK NONE
 
-USER nonroot:nonroot
+USER 1000:1000
+
+ENTRYPOINT ["/app/.venv/bin/spotify-navidrome-sync"]

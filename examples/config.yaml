@@ -1,0 +1,12 @@
+sources:
+  - spotify_playlist_id: "37i9dQZF1DXcBWIGoYBM5M"
+    navidrome_playlist_name: "Spotify Today's Top Hits"
+    download_missing: false
+
+  - spotify_playlist_id: "https://open.spotify.com/playlist/37i9dQZF1DX4JAvHpjipBk"
+    navidrome_playlist_name: "Spotify New Music Friday"
+    download_missing: false
+
+  - spotify_playlist_id: "37i9dQZF1DX0XUsuxWHRQd"
+    navidrome_playlist_name: "Spotify RapCaviar"
+    download_missing: false
