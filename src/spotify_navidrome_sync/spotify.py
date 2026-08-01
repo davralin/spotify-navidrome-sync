@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
@@ -43,17 +44,15 @@ class SpotifyClient:
         self._client_secret = client_secret
         self._http = http or httpx.Client(timeout=30.0)
         self._access_token: str | None = None
+        self._access_token_expires_at = 0.0
 
     def get_playlist(self, playlist_ref: str) -> SpotifyPlaylist:
         playlist_id = extract_playlist_id(playlist_ref)
-        token = self._get_access_token()
-        headers = {"Authorization": f"Bearer {token}"}
-        response = self._http.get(
+        payload = self._get_json(
             f"https://api.spotify.com/v1/playlists/{playlist_id}",
-            headers=headers,
             params={"fields": "id,name,tracks(total)"},
+            action="fetch Spotify playlist",
         )
-        payload = _json_response(response, "fetch Spotify playlist")
         tracks_payload = payload.get("tracks")
         if not isinstance(tracks_payload, dict):
             raise SpotifyError("Spotify playlist response did not contain tracks")
@@ -67,12 +66,11 @@ class SpotifyClient:
             "additional_types": "track",
         }
         while isinstance(next_url, str) and next_url:
-            page_response = self._http.get(
+            page = self._get_json(
                 next_url,
-                headers=headers,
                 params=page_params,
+                action="fetch Spotify playlist page",
             )
-            page = _json_response(page_response, "fetch Spotify playlist page")
             items.extend(_list_value(page.get("items")))
             next_url = page.get("next")
             page_params = None
@@ -84,8 +82,32 @@ class SpotifyClient:
             tracks=tuple(_parse_tracks(items)),
         )
 
-    def _get_access_token(self) -> str:
-        if self._access_token is not None:
+    def _get_json(
+        self,
+        url: str,
+        *,
+        params: dict[str, str] | None,
+        action: str,
+    ) -> dict[str, Any]:
+        response = self._http.get(
+            url,
+            headers={"Authorization": f"Bearer {self._get_access_token()}"},
+            params=params,
+        )
+        if response.status_code == 401:
+            response = self._http.get(
+                url,
+                headers={"Authorization": f"Bearer {self._get_access_token(force_refresh=True)}"},
+                params=params,
+            )
+        return _json_response(response, action)
+
+    def _get_access_token(self, *, force_refresh: bool = False) -> str:
+        if (
+            not force_refresh
+            and self._access_token is not None
+            and monotonic() < self._access_token_expires_at - 60
+        ):
             return self._access_token
 
         response = self._http.post(
@@ -98,6 +120,10 @@ class SpotifyClient:
         if not isinstance(token, str) or not token:
             raise SpotifyError("Spotify token response did not contain an access token")
         self._access_token = token
+        expires_in = payload.get("expires_in")
+        self._access_token_expires_at = monotonic() + (
+            expires_in if isinstance(expires_in, int) else 3600
+        )
         return token
 
 

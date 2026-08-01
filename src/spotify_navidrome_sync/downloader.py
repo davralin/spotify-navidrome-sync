@@ -27,14 +27,12 @@ class SpotdlDownloader:
         spotify_client_id: str,
         spotify_client_secret: str,
         format_name: str = "mp3",
-        max_filename_length: int = 143,
         chunk_size: int = 25,
     ) -> None:
         self._binary = binary
         self._spotify_client_id = spotify_client_id
         self._spotify_client_secret = spotify_client_secret
         self._format_name = format_name
-        self._max_filename_length = max_filename_length
         self._chunk_size = chunk_size
 
     def download_missing(
@@ -101,8 +99,6 @@ class SpotdlDownloader:
             self._format_name,
             "--output",
             str(target_dir / OUTPUT_TEMPLATE),
-            "--max-filename-length",
-            str(self._max_filename_length),
             "download",
             *urls,
         ]
@@ -117,6 +113,8 @@ def _manifest_entry(track: SpotifyTrack, *, target_dir: Path) -> ManifestEntry |
         raise DownloadError("downloaded track did not have a Spotify ID")
 
     matches = sorted(target_dir.glob(f"*-_{track.spotify_id}.mp3"))
+    if not matches:
+        matches = sorted(target_dir.glob(f"{track.spotify_id}_-*.mp3"))
     if not matches:
         return None
     if len(matches) > 1:
