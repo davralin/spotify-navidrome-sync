@@ -8,6 +8,7 @@ LABEL org.opencontainers.image.title="spotify-navidrome-sync"
 LABEL org.opencontainers.image.description="One-shot Spotify playlist to Navidrome playlist sync job"
 
 ENV HOME=/tmp \
+    PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     UV_COMPILE_BYTECODE=1 \
@@ -16,6 +17,10 @@ ENV HOME=/tmp \
 WORKDIR /app
 
 COPY --from=uv /uv /uvx /usr/local/bin/
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 1000 app \
     && useradd --system --uid 1000 --gid 1000 --home-dir /tmp --shell /usr/sbin/nologin app

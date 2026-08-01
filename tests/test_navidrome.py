@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Any, cast
+
 import httpx
 
 from spotify_navidrome_sync.navidrome import NavidromeClient
@@ -105,3 +110,59 @@ def test_replace_playlist_updates_existing_playlist() -> None:
     update_body = requests[-1].content.decode()
     assert "playlistId=existing" in update_body
     assert "songId=song-1" in update_body
+
+
+def test_scan_api_uses_real_http_requests() -> None:
+    requests: list[tuple[str, str]] = []
+    scan_status_responses = [True, False]
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode()
+            requests.append((self.path, body))
+            if self.path.endswith("/startScan.view"):
+                self._send_json({"subsonic-response": {"status": "ok"}})
+                return
+            if self.path.endswith("/getScanStatus.view"):
+                scanning = scan_status_responses.pop(0)
+                self._send_json(
+                    {
+                        "subsonic-response": {
+                            "status": "ok",
+                            "scanStatus": {"scanning": scanning, "count": 10},
+                        }
+                    }
+                )
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _send_json(self, payload: dict[str, Any]) -> None:
+            encoded = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        host, port = cast(tuple[str, int], server.server_address)
+        client = NavidromeClient(f"http://{host}:{port}", "user", "password")
+
+        client.start_scan()
+        client.wait_for_scan_completion(timeout_seconds=5, poll_seconds=0.01)
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
+
+    paths = [path for path, _body in requests]
+    assert paths == ["/rest/startScan.view", "/rest/getScanStatus.view", "/rest/getScanStatus.view"]
+    assert all("u=user" in body for _path, body in requests)

@@ -4,7 +4,7 @@ One-shot container job for syncing configured Spotify playlists into Navidrome p
 
 Spotify is the authoritative source for playlist order and membership. The job reads configured public Spotify playlists, searches the Navidrome library for matching local tracks, and creates or updates Navidrome playlists with the matched tracks in Spotify order.
 
-The initial implementation does not download missing tracks, does not run `spotdl`, does not trigger Navidrome scans, and does not delete media files.
+Sources can optionally download missing tracks with `spotdl download`. Downloads are app-planned from Navidrome matching results; the job does not use `spotdl sync`, `.spotdl` state files, or `.m3u8` playlist files as playlist state.
 
 ## Configuration
 
@@ -16,6 +16,9 @@ SPOTIFY_CLIENT_SECRET=your_spotify_app_client_secret
 NAVIDROME_URL=https://navidrome.example.org
 NAVIDROME_USERNAME=your_navidrome_username
 NAVIDROME_PASSWORD=your_navidrome_password
+DOWNLOAD_ROOT=/media
+SPOTDL_BIN=spotdl
+NAVIDROME_SCAN_TIMEOUT_SECONDS=900
 ```
 
 Create Spotify app credentials from the Spotify Developer Dashboard. The current sync mode uses Spotify Client Credentials, so configured playlists must be readable without user OAuth.
@@ -30,7 +33,9 @@ sources:
 
   - spotify_playlist_id: "https://open.spotify.com/playlist/37i9dQZF1DX4JAvHpjipBk"
     navidrome_playlist_name: "Spotify New Music Friday"
-    download_missing: false
+    download_missing: true
+    download_target: "new-music-friday"
+    cleanup_downloads: true
 ```
 
 Unknown config keys are ignored.
@@ -42,7 +47,9 @@ Required source fields:
 
 Optional source fields:
 
-- `download_missing`, default `false`; `true` is not implemented yet
+- `download_missing`, default `false`; when true, download unmatched Spotify tracks
+- `download_target`; required when `download_missing` or `cleanup_downloads` is true, and must be a safe single path segment below `DOWNLOAD_ROOT`
+- `cleanup_downloads`, default `false`; when true, delete obsolete app-owned files recorded in the target manifest
 
 See `examples/config.yaml` for a complete multi-playlist example.
 
@@ -56,6 +63,26 @@ For each Spotify track, the job searches Navidrome and chooses a local song usin
 - FLAC preference when equivalent local candidates exist
 
 Tracks that cannot be matched safely are skipped and counted as `missing` or `ambiguous` in the final log line for each playlist. Spotify remains authoritative for playlist ordering.
+
+For downloader-enabled sources, the first matching pass determines the missing tracks. The job downloads only those explicit Spotify track URLs, starts a Navidrome scan, waits for completion, re-matches the whole playlist, and then replaces the Navidrome playlist.
+
+Only Navidrome `/music/rip/...` paths are mapped back to the local filesystem under `DOWNLOAD_ROOT`. Other Navidrome library paths such as `/music/artists/...` are trusted as indexed library state and are never mutated by this job.
+
+## Downloads And Cleanup
+
+Downloaded files are written below `DOWNLOAD_ROOT/<download_target>/` as MP3 files with the Spotify track ID in the filename:
+
+```text
+{artist}_-_{title}_-_{track-id}.{output-ext}
+```
+
+Each target directory has an app-owned manifest:
+
+```text
+.spotify-navidrome-sync.json
+```
+
+Cleanup deletes only files listed in that manifest and only when the resolved path remains inside the configured target directory. Files outside the target directory and files not recorded in the manifest are never deleted automatically.
 
 ## Run Locally
 
@@ -74,14 +101,16 @@ docker run --rm \
   -e NAVIDROME_URL \
   -e NAVIDROME_USERNAME \
   -e NAVIDROME_PASSWORD \
+  -e DOWNLOAD_ROOT=/media \
   -v "$PWD/examples/config.yaml:/config/config.yaml:ro" \
+  -v "/tmp/spotify-navidrome-sync-media:/media" \
   spotify-navidrome-sync:local \
   /config/config.yaml
 ```
 
 For real local runs, keep your own config file outside the repository and mount that file instead of `examples/config.yaml`.
 
-The command creates or replaces matching Navidrome playlists. It does not download missing tracks, run `spotdl`, trigger a Navidrome scan, or delete media.
+For real local downloader tests, use a scratch directory for `/media` first. A local scratch mount can verify spotDL invocation, file placement, manifest cleanup, and the Navidrome scan API call. It cannot prove that your production Navidrome instance indexes the scratch files unless Navidrome is configured to scan that same path.
 
 ## Development
 
@@ -97,4 +126,4 @@ uv run pytest tests -v
 
 Initial Spotify authentication uses Client Credentials and supports configured public playlists. Spotify Liked Songs and other user-library sources are deferred because they require user OAuth and refresh-token handling.
 
-See `adr/0009-sync-configured-spotify-playlists-with-client-credentials.md` for the current sync scope.
+See `adr/0009-sync-configured-spotify-playlists-with-client-credentials.md` for the initial sync scope and `adr/0010-download-missing-spotify-tracks-as-app-owned-rip-files.md` for downloader and cleanup behavior.

@@ -5,13 +5,44 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 
-from spotify_navidrome_sync.config import ConfigError, load_app_config, load_runtime_config
-from spotify_navidrome_sync.matching import match_track, search_query
+from spotify_navidrome_sync.config import (
+    ConfigError,
+    RuntimeConfig,
+    SourceConfig,
+    load_app_config,
+    load_runtime_config,
+)
+from spotify_navidrome_sync.downloader import DownloadError, SpotdlDownloader
+from spotify_navidrome_sync.manifest import (
+    ManifestError,
+    cleanup_manifest_files,
+    load_manifest,
+    merge_manifest_entries,
+    write_manifest,
+)
+from spotify_navidrome_sync.matching import TrackMatch, match_track, search_query
+from spotify_navidrome_sync.media_paths import filter_stale_rip_candidates, target_dir
 from spotify_navidrome_sync.navidrome import NavidromeClient, NavidromeError
-from spotify_navidrome_sync.spotify import SpotifyClient, SpotifyError, SpotifyPlaylist
+from spotify_navidrome_sync.spotify import (
+    SpotifyClient,
+    SpotifyError,
+    SpotifyPlaylist,
+    SpotifyTrack,
+)
 
 LOGGER = logging.getLogger("spotify_navidrome_sync")
+
+
+@dataclass(frozen=True)
+class PlaylistPlan:
+    matches: tuple[TrackMatch, ...]
+    song_ids: tuple[str, ...]
+    missing_tracks: tuple[SpotifyTrack, ...]
+    matched: int
+    ambiguous: int
+    missing: int
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -33,13 +64,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             runtime_config.navidrome_username,
             runtime_config.navidrome_password,
         )
+        downloader = SpotdlDownloader(
+            binary=runtime_config.spotdl_bin,
+            spotify_client_id=runtime_config.spotify_client_id,
+            spotify_client_secret=runtime_config.spotify_client_secret,
+        )
         navidrome.ping()
 
         LOGGER.info("loaded %d playlist source(s)", len(app_config.sources))
         for source in app_config.sources:
             playlist = spotify.get_playlist(source.spotify_playlist_id)
-            _sync_playlist(navidrome, playlist, source.navidrome_playlist_name)
-    except (ConfigError, SpotifyError, NavidromeError) as exc:
+            _sync_playlist(navidrome, downloader, playlist, source, runtime_config)
+    except (
+        ConfigError,
+        SpotifyError,
+        NavidromeError,
+        DownloadError,
+        ManifestError,
+        ValueError,
+    ) as exc:
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
         LOGGER.error("%s", exc)
         return 1
@@ -49,8 +92,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _sync_playlist(
     navidrome: NavidromeClient,
+    downloader: SpotdlDownloader,
     playlist: SpotifyPlaylist,
-    navidrome_playlist_name: str,
+    source: SourceConfig,
+    runtime: RuntimeConfig,
 ) -> None:
     LOGGER.info(
         "syncing Spotify playlist %r (%d fetched track(s), %d reported total) "
@@ -58,17 +103,66 @@ def _sync_playlist(
         playlist.name,
         len(playlist.tracks),
         playlist.total_tracks,
-        navidrome_playlist_name,
+        source.navidrome_playlist_name,
     )
 
+    plan = _plan_playlist(navidrome, playlist, runtime=runtime)
+
+    directory = None
+    if source.download_target is not None:
+        directory = target_dir(runtime.download_root, source.download_target)
+
+    if source.download_missing and directory is not None and plan.missing_tracks:
+        existing_entries = load_manifest(directory)
+        downloaded_entries = downloader.download_missing(plan.missing_tracks, target_dir=directory)
+        if downloaded_entries:
+            write_manifest(directory, merge_manifest_entries(existing_entries, downloaded_entries))
+            _scan(navidrome, runtime=runtime, reason="after downloading missing tracks")
+            plan = _plan_playlist(navidrome, playlist, runtime=runtime)
+        else:
+            LOGGER.warning("spotDL did not create any files for missing tracks")
+    elif source.download_missing:
+        LOGGER.info("no missing tracks require download for %r", source.navidrome_playlist_name)
+
+    playlist_id = navidrome.replace_playlist(source.navidrome_playlist_name, plan.song_ids)
+    LOGGER.info(
+        "updated Navidrome playlist %r (%s): matched=%d ambiguous=%d missing=%d",
+        source.navidrome_playlist_name,
+        playlist_id,
+        plan.matched,
+        plan.ambiguous,
+        plan.missing,
+    )
+
+    if source.cleanup_downloads and directory is not None and source.download_target is not None:
+        deleted = cleanup_manifest_files(
+            directory,
+            _manifest_keep_spotify_ids(plan.matches, source.download_target),
+        )
+        if deleted:
+            _scan(navidrome, runtime=runtime, reason="after cleaning up downloaded tracks")
+
+
+def _plan_playlist(
+    navidrome: NavidromeClient,
+    playlist: SpotifyPlaylist,
+    *,
+    runtime: RuntimeConfig,
+) -> PlaylistPlan:
     song_ids: list[str] = []
+    matches: list[TrackMatch] = []
+    missing_tracks: list[SpotifyTrack] = []
     matched = 0
     ambiguous = 0
     missing = 0
 
     for track in playlist.tracks:
-        candidates = navidrome.search_songs(search_query(track))
+        candidates = filter_stale_rip_candidates(
+            navidrome.search_songs(search_query(track)),
+            download_root=runtime.download_root,
+        )
         result = match_track(track, candidates)
+        matches.append(result)
         if result.matched_song is not None:
             matched += 1
             song_ids.append(result.matched_song.id)
@@ -83,17 +177,40 @@ def _sync_playlist(
             )
         else:
             missing += 1
+            missing_tracks.append(track)
             LOGGER.debug("missing in Navidrome: %s - %s", track.primary_artist, track.name)
 
-    playlist_id = navidrome.replace_playlist(navidrome_playlist_name, tuple(song_ids))
-    LOGGER.info(
-        "updated Navidrome playlist %r (%s): matched=%d ambiguous=%d missing=%d",
-        navidrome_playlist_name,
-        playlist_id,
-        matched,
-        ambiguous,
-        missing,
+    return PlaylistPlan(
+        matches=tuple(matches),
+        song_ids=tuple(song_ids),
+        missing_tracks=tuple(missing_tracks),
+        matched=matched,
+        ambiguous=ambiguous,
+        missing=missing,
     )
+
+
+def _scan(navidrome: NavidromeClient, *, runtime: RuntimeConfig, reason: str) -> None:
+    LOGGER.info("starting Navidrome scan %s", reason)
+    navidrome.start_scan()
+    navidrome.wait_for_scan_completion(timeout_seconds=runtime.navidrome_scan_timeout_seconds)
+    LOGGER.info("Navidrome scan completed %s", reason)
+
+
+def _manifest_keep_spotify_ids(matches: tuple[TrackMatch, ...], download_target: str) -> set[str]:
+    keep: set[str] = set()
+    rip_prefix = f"/music/rip/{download_target}/"
+    for match in matches:
+        spotify_id = match.spotify_track.spotify_id
+        if spotify_id is None:
+            continue
+        if match.matched_song is None:
+            keep.add(spotify_id)
+            continue
+        path = match.matched_song.raw.get("path")
+        if isinstance(path, str) and path.startswith(rip_prefix):
+            keep.add(spotify_id)
+    return keep
 
 
 def _configure_logging(level: str) -> None:

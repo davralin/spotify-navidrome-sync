@@ -17,6 +17,8 @@ class SourceConfig:
     spotify_playlist_id: str
     navidrome_playlist_name: str
     download_missing: bool = False
+    download_target: str | None = None
+    cleanup_downloads: bool = False
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,9 @@ class RuntimeConfig:
     navidrome_username: str
     navidrome_password: str
     log_level: str = "INFO"
+    download_root: Path = Path("/media")
+    spotdl_bin: str = "spotdl"
+    navidrome_scan_timeout_seconds: int = 900
 
 
 def load_app_config(path: str | Path) -> AppConfig:
@@ -90,6 +95,13 @@ def load_runtime_config(env: Mapping[str, str]) -> RuntimeConfig:
         navidrome_username=values["navidrome_username"],
         navidrome_password=values["navidrome_password"],
         log_level=env.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        download_root=Path(env.get("DOWNLOAD_ROOT", "/media").strip() or "/media"),
+        spotdl_bin=env.get("SPOTDL_BIN", "spotdl").strip() or "spotdl",
+        navidrome_scan_timeout_seconds=_optional_positive_int(
+            env.get("NAVIDROME_SCAN_TIMEOUT_SECONDS"),
+            default=900,
+            name="NAVIDROME_SCAN_TIMEOUT_SECONDS",
+        ),
     )
 
 
@@ -97,14 +109,27 @@ def _parse_source(index: int, source_raw: Mapping[str, Any]) -> SourceConfig:
     playlist_id = _required_string(index, source_raw, "spotify_playlist_id")
     playlist_name = _required_string(index, source_raw, "navidrome_playlist_name")
     download_missing = _optional_bool(source_raw.get("download_missing", False))
+    cleanup_downloads = _optional_bool(source_raw.get("cleanup_downloads", False))
+    download_target = _optional_string(source_raw.get("download_target"))
 
     if download_missing:
-        raise ConfigError(f"source {index} download_missing=true is not implemented yet")
+        if download_target is None:
+            raise ConfigError(
+                f"source {index} download_target is required when download_missing=true"
+            )
+        _validate_download_target(index, download_target)
+    elif download_target is not None:
+        _validate_download_target(index, download_target)
+
+    if cleanup_downloads and download_target is None:
+        raise ConfigError(f"source {index} download_target is required when cleanup_downloads=true")
 
     return SourceConfig(
         spotify_playlist_id=playlist_id,
         navidrome_playlist_name=playlist_name,
         download_missing=download_missing,
+        download_target=download_target,
+        cleanup_downloads=cleanup_downloads,
     )
 
 
@@ -124,7 +149,35 @@ def _optional_bool(value: object) -> bool:
             return True
         if lowered in {"0", "false", "no", "off"}:
             return False
-    raise ConfigError("download_missing must be a boolean")
+    raise ConfigError("boolean config values must be true or false")
+
+
+def _optional_string(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError("optional string config values must be non-empty strings")
+    return value.strip()
+
+
+def _validate_download_target(index: int, value: str) -> None:
+    path = Path(value)
+    if path.is_absolute() or path.name != value or value in {".", ".."}:
+        raise ConfigError(f"source {index} download_target must be a safe single path segment")
+    if ".." in path.parts or "/" in value or "\\" in value:
+        raise ConfigError(f"source {index} download_target must be a safe single path segment")
+
+
+def _optional_positive_int(value: str | None, *, default: int, name: str) -> int:
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ConfigError(f"{name} must be a positive integer")
+    return parsed
 
 
 def _env_true(value: str | None) -> bool:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,6 +28,12 @@ class NavidromeSong:
 class NavidromePlaylist:
     id: str
     name: str
+
+
+@dataclass(frozen=True)
+class NavidromeScanStatus:
+    scanning: bool
+    count: int | None
 
 
 class NavidromeClient:
@@ -94,6 +101,33 @@ class NavidromeClient:
         if matches:
             return matches[0].id
         raise NavidromeError(f"Navidrome did not return a playlist id for {name!r}")
+
+    def start_scan(self) -> None:
+        self._request("startScan", [])
+
+    def get_scan_status(self) -> NavidromeScanStatus:
+        payload = self._request("getScanStatus", [])
+        status = payload.get("scanStatus")
+        if not isinstance(status, dict):
+            return NavidromeScanStatus(scanning=False, count=None)
+        scanning = status.get("scanning") is True
+        count = status.get("count") if isinstance(status.get("count"), int) else None
+        return NavidromeScanStatus(scanning=scanning, count=count)
+
+    def wait_for_scan_completion(
+        self,
+        *,
+        timeout_seconds: int,
+        poll_seconds: float = 5.0,
+    ) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            status = self.get_scan_status()
+            if not status.scanning:
+                return
+            if time.monotonic() >= deadline:
+                raise NavidromeError("Navidrome scan did not complete before timeout")
+            time.sleep(poll_seconds)
 
     def _request(self, endpoint: str, params: list[tuple[str, str]]) -> dict[str, Any]:
         body = str(httpx.QueryParams([*self._auth_params(), *params]))
