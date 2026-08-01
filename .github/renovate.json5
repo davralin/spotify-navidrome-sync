@@ -11,7 +11,7 @@
   dependencyDashboard: true,
   dependencyDashboardTitle: 'Renovate Dashboard',
   rebaseWhen: 'conflicted',
-  automergeStrategy: 'rebase',
+  automergeStrategy: 'pr',
 
   lockFileMaintenance: {
     enabled: true,
