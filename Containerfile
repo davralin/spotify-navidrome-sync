@@ -2,7 +2,7 @@
 
 FROM ghcr.io/astral-sh/uv:0.12.1@sha256:cf4eedcaa81655197f625739489effcbe71b61ceb1506f332c3facae5deceded AS uv
 
-FROM python:3.14-slim-bookworm@sha256:86f975aca15cf04a40b399eebede9aea7c82eae084d1f1a0a6ef6bcaae871a30
+FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6
 
 LABEL org.opencontainers.image.title="spotify-navidrome-sync"
 LABEL org.opencontainers.image.description="One-shot Spotify playlist to Navidrome playlist sync job"
@@ -29,11 +29,9 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
 RUN uv sync --frozen --no-dev --no-editable \
-    && rm -rf /usr/local/lib/python3.12/site-packages/pip \
-        /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
-        /usr/local/bin/pip \
-        /usr/local/bin/pip3 \
-        /usr/local/bin/pip3.12 \
+    && rm -rf /usr/local/lib/python*/site-packages/pip \
+        /usr/local/lib/python*/site-packages/pip-*.dist-info \
+        /usr/local/bin/pip* \
         /tmp/.cache/uv \
     && chown -R app:app /app /tmp
 
