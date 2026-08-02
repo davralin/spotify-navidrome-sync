@@ -51,6 +51,7 @@ jobs:
           image: ghcr.io/${{ github.repository }}:latest
           fail-build: false
           severity-cutoff: high
+          only-fixed: true
           output-format: sarif
 
       - name: Upload Grype SARIF
