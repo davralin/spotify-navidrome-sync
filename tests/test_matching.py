@@ -107,8 +107,64 @@ def test_match_track_uses_duration_tolerance() -> None:
         isrc=None,
         spotify_id="spotify-track",
     )
-    too_long = NavidromeSong("one", "Song", "Artist", 130, "flac", (), {})
+    too_long = NavidromeSong("one", "Song", "Artist", 133, "flac", (), {})
 
     result = match_track(track, (too_long,))
 
     assert result.status == "missing"
+
+
+def test_match_track_accepts_combined_artist_tag() -> None:
+    track = SpotifyTrack(
+        name="Crazy",
+        artists=("DJ Goja", "Nito-Onna"),
+        duration_seconds=120,
+        isrc=None,
+        spotify_id="spotify-track",
+    )
+    song = NavidromeSong("one", "Crazy", "DJ Goja/Nito-Onna", 121, "mp3", (), {})
+
+    result = match_track(track, (song,))
+
+    assert result.status == "matched"
+    assert result.matched_song == song
+
+
+def test_match_track_accepts_small_duration_difference_for_strong_metadata_match() -> None:
+    track = SpotifyTrack(
+        name="I Will Wait",
+        artists=("Mumford & Sons",),
+        duration_seconds=276,
+        isrc=None,
+        spotify_id="spotify-track",
+    )
+    song = NavidromeSong("one", "I Will Wait", "Mumford & Sons", 287, "mp3", (), {})
+
+    result = match_track(track, (song,))
+
+    assert result.status == "matched"
+    assert result.matched_song == song
+
+
+def test_match_track_accepts_safe_title_suffix_for_strong_artist_duration_match() -> None:
+    track = SpotifyTrack(
+        name="Unnskyld Agnetha",
+        artists=("Anders Mordal",),
+        duration_seconds=120,
+        isrc=None,
+        spotify_id="spotify-track",
+    )
+    song = NavidromeSong(
+        "one",
+        "Unnskyld Agnetha - fra Jul i svingen",
+        "Anders Mordal",
+        120,
+        "mp3",
+        (),
+        {},
+    )
+
+    result = match_track(track, (song,))
+
+    assert result.status == "matched"
+    assert result.matched_song == song

@@ -37,8 +37,8 @@ def match_track(track: SpotifyTrack, candidates: tuple[NavidromeSong, ...]) -> T
     strict_matches = tuple(
         candidate
         for candidate in candidates
-        if normalize(candidate.title) == normalized_title
-        and normalize(candidate.artist) in normalized_artists
+        if _title_compatible(normalize(candidate.title), normalized_title)
+        and _artist_compatible(normalize(candidate.artist), normalized_artists)
         and _duration_close(track.duration_seconds, candidate.duration_seconds)
     )
 
@@ -62,6 +62,24 @@ def normalize(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", lowered).strip()
 
 
+def _title_compatible(candidate_title: str, spotify_title: str) -> bool:
+    if candidate_title == spotify_title:
+        return True
+    return candidate_title.startswith(f"{spotify_title} ") or spotify_title.startswith(
+        f"{candidate_title} "
+    )
+
+
+def _artist_compatible(candidate_artist: str, spotify_artists: set[str]) -> bool:
+    if candidate_artist in spotify_artists:
+        return True
+    return any(_contains_phrase(candidate_artist, artist) for artist in spotify_artists)
+
+
+def _contains_phrase(value: str, phrase: str) -> bool:
+    return f" {phrase} " in f" {value} "
+
+
 def _select_preferred(candidates: tuple[NavidromeSong, ...]) -> NavidromeSong | None:
     if not candidates:
         return None
@@ -77,4 +95,4 @@ def _preference_key(candidate: NavidromeSong) -> tuple[int, str, str]:
 def _duration_close(left: int | None, right: int | None) -> bool:
     if left is None or right is None:
         return True
-    return abs(left - right) <= 5
+    return abs(left - right) <= 12

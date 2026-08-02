@@ -152,3 +152,65 @@ def test_sync_playlist_downloads_scans_rematches_then_replaces_playlist(tmp_path
     assert [entry.spotify_id for entry in load_manifest(target)] == ["spotify-track"]
     assert (target / "Artist_-_Song_-_spotify-track.mp3").exists()
     assert not stale_path.exists()
+
+
+def test_sync_playlist_matches_downloaded_manifest_file_by_relative_path(tmp_path: Path) -> None:
+    class ManifestPathNavidrome(FakeNavidrome):
+        def search_songs(self, query: str, *, count: int = 10) -> tuple[NavidromeSong, ...]:
+            self.events.append(f"search:{query}")
+            if not self.scan_started:
+                return ()
+            return (
+                NavidromeSong(
+                    "navidrome-song",
+                    "Different title from indexed tags",
+                    "Different artist",
+                    999,
+                    "mp3",
+                    (),
+                    {"path": "small-test/Artist_-_Song_-_spotify-track.mp3"},
+                ),
+            )
+
+    navidrome = ManifestPathNavidrome()
+    downloader = FakeDownloader()
+    playlist = SpotifyPlaylist(
+        spotify_id="playlist-id",
+        name="Small",
+        total_tracks=1,
+        tracks=(
+            SpotifyTrack(
+                "Song",
+                ("Artist",),
+                120,
+                "NO1234567890",
+                "spotify-track",
+            ),
+        ),
+    )
+    source = SourceConfig(
+        spotify_playlist_id="playlist-id",
+        navidrome_playlist_name="Small Downloader Test",
+        download_missing=True,
+        download_target="small-test",
+    )
+    runtime = RuntimeConfig(
+        spotify_client_id="client-id",
+        spotify_client_secret="client-secret",
+        navidrome_url="https://navidrome.example.org",
+        navidrome_username="user",
+        navidrome_password="password",
+        download_root=tmp_path,
+        navidrome_scan_timeout_seconds=7,
+    )
+
+    _sync_playlist(
+        cast(NavidromeClient, navidrome),
+        downloader,
+        playlist,
+        source,
+        runtime,
+    )
+
+    assert downloader.downloaded == ["spotify-track"]
+    assert navidrome.replaced_song_ids == ("navidrome-song",)

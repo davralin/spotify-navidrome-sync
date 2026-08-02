@@ -6,6 +6,7 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 from spotify_navidrome_sync.config import (
     ConfigError,
@@ -16,6 +17,7 @@ from spotify_navidrome_sync.config import (
 )
 from spotify_navidrome_sync.downloader import DownloadError, SpotdlDownloader
 from spotify_navidrome_sync.manifest import (
+    ManifestEntry,
     ManifestError,
     cleanup_manifest_files,
     load_manifest,
@@ -23,8 +25,12 @@ from spotify_navidrome_sync.manifest import (
     write_manifest,
 )
 from spotify_navidrome_sync.matching import TrackMatch, match_track, search_query
-from spotify_navidrome_sync.media_paths import filter_stale_rip_candidates, target_dir
-from spotify_navidrome_sync.navidrome import NavidromeClient, NavidromeError
+from spotify_navidrome_sync.media_paths import (
+    filter_stale_rip_candidates,
+    rip_song_path,
+    target_dir,
+)
+from spotify_navidrome_sync.navidrome import NavidromeClient, NavidromeError, NavidromeSong
 from spotify_navidrome_sync.spotify import (
     SpotifyClient,
     SpotifyError,
@@ -106,19 +112,31 @@ def _sync_playlist(
         source.navidrome_playlist_name,
     )
 
-    plan = _plan_playlist(navidrome, playlist, runtime=runtime)
-
     directory = None
+    manifest_entries: tuple[ManifestEntry, ...] = ()
     if source.download_target is not None:
         directory = target_dir(runtime.download_root, source.download_target)
+        manifest_entries = load_manifest(directory)
+
+    plan = _plan_playlist(
+        navidrome,
+        playlist,
+        runtime=runtime,
+        manifest_entries=manifest_entries,
+    )
 
     if source.download_missing and directory is not None and plan.missing_tracks:
-        existing_entries = load_manifest(directory)
         downloaded_entries = downloader.download_missing(plan.missing_tracks, target_dir=directory)
         if downloaded_entries:
-            write_manifest(directory, merge_manifest_entries(existing_entries, downloaded_entries))
+            manifest_entries = merge_manifest_entries(manifest_entries, downloaded_entries)
+            write_manifest(directory, manifest_entries)
             _scan(navidrome, runtime=runtime, reason="after downloading missing tracks")
-            plan = _plan_playlist(navidrome, playlist, runtime=runtime)
+            plan = _plan_playlist(
+                navidrome,
+                playlist,
+                runtime=runtime,
+                manifest_entries=manifest_entries,
+            )
         else:
             LOGGER.warning("spotDL did not create any files for missing tracks")
     elif source.download_missing:
@@ -148,6 +166,7 @@ def _plan_playlist(
     playlist: SpotifyPlaylist,
     *,
     runtime: RuntimeConfig,
+    manifest_entries: tuple[ManifestEntry, ...] = (),
 ) -> PlaylistPlan:
     song_ids: list[str] = []
     matches: list[TrackMatch] = []
@@ -156,12 +175,21 @@ def _plan_playlist(
     ambiguous = 0
     missing = 0
 
+    manifest_by_spotify_id = {
+        entry.spotify_id: entry for entry in manifest_entries if entry.spotify_id
+    }
+
     for track in playlist.tracks:
         candidates = filter_stale_rip_candidates(
             navidrome.search_songs(search_query(track)),
             download_root=runtime.download_root,
         )
-        result = match_track(track, candidates)
+        result = _match_manifest_entry(
+            track,
+            manifest_by_spotify_id.get(track.spotify_id or ""),
+            candidates,
+            runtime=runtime,
+        ) or match_track(track, candidates)
         matches.append(result)
         if result.matched_song is not None:
             matched += 1
@@ -188,6 +216,44 @@ def _plan_playlist(
         ambiguous=ambiguous,
         missing=missing,
     )
+
+
+def _match_manifest_entry(
+    track: SpotifyTrack,
+    entry: ManifestEntry | None,
+    candidates: tuple[NavidromeSong, ...],
+    *,
+    runtime: RuntimeConfig,
+) -> TrackMatch | None:
+    if entry is None:
+        return None
+
+    expected_path = entry.path.resolve()
+    for candidate in candidates:
+        if _candidate_path_matches_manifest(candidate, expected_path, runtime=runtime):
+            return TrackMatch(spotify_track=track, matched_song=candidate)
+
+    return None
+
+
+def _candidate_path_matches_manifest(
+    candidate: NavidromeSong,
+    expected_path: Path,
+    *,
+    runtime: RuntimeConfig,
+) -> bool:
+    mapped_path = rip_song_path(candidate, download_root=runtime.download_root)
+    if mapped_path is not None and mapped_path.resolve() == expected_path:
+        return True
+
+    raw_path = candidate.raw.get("path")
+    if not isinstance(raw_path, str):
+        return False
+    try:
+        relative_expected = expected_path.relative_to(runtime.download_root.resolve())
+    except ValueError:
+        return False
+    return raw_path == str(relative_expected)
 
 
 def _scan(navidrome: NavidromeClient, *, runtime: RuntimeConfig, reason: str) -> None:
