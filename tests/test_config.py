@@ -102,7 +102,7 @@ def test_load_runtime_config_requires_env_credentials() -> None:
         load_runtime_config({})
 
 
-def test_load_runtime_config_rejects_dry_run_until_implemented() -> None:
+def test_load_runtime_config_accepts_dry_run() -> None:
     env = {
         "SPOTIFY_CLIENT_ID": "client-id",
         "SPOTIFY_CLIENT_SECRET": "client-secret",
@@ -112,8 +112,9 @@ def test_load_runtime_config_rejects_dry_run_until_implemented() -> None:
         "DRY_RUN": "true",
     }
 
-    with pytest.raises(ConfigError, match="DRY_RUN=true is not implemented yet"):
-        load_runtime_config(env)
+    runtime = load_runtime_config(env)
+
+    assert runtime.dry_run is True
 
 
 def test_load_runtime_config_accepts_downloader_runtime_env() -> None:

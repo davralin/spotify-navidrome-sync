@@ -19,6 +19,7 @@ NAVIDROME_PASSWORD=your_navidrome_password
 DOWNLOAD_ROOT=/media
 SPOTDL_BIN=spotdl
 NAVIDROME_SCAN_TIMEOUT_SECONDS=900
+DRY_RUN=false
 ```
 
 Create Spotify app credentials from the Spotify Developer Dashboard. The current sync mode uses Spotify Client Credentials, so configured playlists must be readable without user OAuth.
@@ -67,6 +68,12 @@ Tracks that cannot be matched safely are skipped and counted as `missing` or `am
 For downloader-enabled sources, the first matching pass determines the missing tracks. The job downloads only those explicit Spotify track URLs, starts a Navidrome scan, waits for completion, re-matches the whole playlist, and then replaces the Navidrome playlist.
 
 Only Navidrome `/music/rip/...` paths are mapped back to the local filesystem under `DOWNLOAD_ROOT`. Other Navidrome library paths such as `/music/artists/...` are trusted as indexed library state and are never mutated by this job.
+
+## Dry Run And Report
+
+Set `DRY_RUN=true` to plan a run without mutating Navidrome or the download directory. Dry runs still fetch Spotify playlists, search Navidrome, load manifests, and build the final plan, but they do not run spotDL, start scans, replace playlists, write manifests, or delete files.
+
+Each run prints a final text report to stdout. Logs are still written through normal logging, while the report is intended for CronJob log collection. The report includes one section per playlist with fetched/reported track counts, matched/missing/ambiguous counts, planned or actual download and cleanup counts, the Navidrome playlist action, and unresolved track diagnostics.
 
 ## Downloads And Cleanup
 

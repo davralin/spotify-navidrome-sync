@@ -51,6 +51,42 @@ class PlaylistPlan:
     missing: int
 
 
+@dataclass(frozen=True)
+class TrackDiagnostic:
+    status: str
+    title: str
+    artists: tuple[str, ...]
+    spotify_id: str | None
+    isrc: str | None
+    navidrome_id: str | None = None
+    navidrome_title: str | None = None
+    navidrome_artist: str | None = None
+
+
+@dataclass(frozen=True)
+class PlaylistReport:
+    spotify_playlist_id: str
+    spotify_playlist_name: str
+    spotify_tracks_total: int
+    spotify_tracks_fetched: int
+    navidrome_playlist_name: str
+    matched: int
+    ambiguous: int
+    missing: int
+    downloaded: int
+    cleaned_up: int
+    dry_run: bool
+    action: str
+    navidrome_playlist_id: str | None
+    diagnostics: tuple[TrackDiagnostic, ...]
+
+
+@dataclass(frozen=True)
+class RunReport:
+    dry_run: bool
+    playlists: tuple[PlaylistReport, ...]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Sync Spotify playlists into Navidrome playlists")
     parser.add_argument("config", help="path to config.yaml")
@@ -78,9 +114,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         navidrome.ping()
 
         LOGGER.info("loaded %d playlist source(s)", len(app_config.sources))
+        playlist_reports: list[PlaylistReport] = []
         for source in app_config.sources:
             playlist = spotify.get_playlist(source.spotify_playlist_id)
-            _sync_playlist(navidrome, downloader, playlist, source, runtime_config)
+            playlist_reports.append(
+                _sync_playlist(navidrome, downloader, playlist, source, runtime_config)
+            )
+        _print_report(RunReport(dry_run=runtime_config.dry_run, playlists=tuple(playlist_reports)))
     except (
         ConfigError,
         SpotifyError,
@@ -102,7 +142,7 @@ def _sync_playlist(
     playlist: SpotifyPlaylist,
     source: SourceConfig,
     runtime: RuntimeConfig,
-) -> None:
+) -> PlaylistReport:
     LOGGER.info(
         "syncing Spotify playlist %r (%d fetched track(s), %d reported total) "
         "to Navidrome playlist %r",
@@ -125,8 +165,47 @@ def _sync_playlist(
         manifest_entries=manifest_entries,
     )
 
+    downloaded = 0
+    cleaned_up = 0
+    playlist_id: str | None = None
+    action = "dry-run" if runtime.dry_run else "updated"
+
+    if runtime.dry_run:
+        if source.download_missing:
+            downloaded = len(plan.missing_tracks)
+        if source.cleanup_downloads:
+            cleaned_up = _count_cleanup_candidates(manifest_entries, playlist)
+        if source.download_missing and plan.missing_tracks:
+            LOGGER.info(
+                "dry run: would download %d missing track(s) for %r",
+                len(plan.missing_tracks),
+                source.navidrome_playlist_name,
+            )
+        LOGGER.info(
+            "dry run: would replace Navidrome playlist %r with %d matched song(s)",
+            source.navidrome_playlist_name,
+            len(plan.song_ids),
+        )
+        if source.cleanup_downloads:
+            LOGGER.info(
+                "dry run: would clean up %d app-owned file(s) for %r",
+                cleaned_up,
+                source.navidrome_playlist_name,
+            )
+        return _playlist_report(
+            playlist,
+            source,
+            plan,
+            downloaded=downloaded,
+            cleaned_up=cleaned_up,
+            dry_run=runtime.dry_run,
+            action=action,
+            navidrome_playlist_id=playlist_id,
+        )
+
     if source.download_missing and directory is not None and plan.missing_tracks:
         downloaded_entries = downloader.download_missing(plan.missing_tracks, target_dir=directory)
+        downloaded = len(downloaded_entries)
         if downloaded_entries:
             manifest_entries = merge_manifest_entries(manifest_entries, downloaded_entries)
             write_manifest(directory, manifest_entries)
@@ -153,12 +232,23 @@ def _sync_playlist(
     )
 
     if source.cleanup_downloads and directory is not None and source.download_target is not None:
-        deleted = cleanup_manifest_files(
+        cleaned_up = cleanup_manifest_files(
             directory,
             {track.spotify_id for track in playlist.tracks if track.spotify_id is not None},
         )
-        if deleted:
+        if cleaned_up:
             _scan(navidrome, runtime=runtime, reason="after cleaning up downloaded tracks")
+
+    return _playlist_report(
+        playlist,
+        source,
+        plan,
+        downloaded=downloaded,
+        cleaned_up=cleaned_up,
+        dry_run=runtime.dry_run,
+        action=action,
+        navidrome_playlist_id=playlist_id,
+    )
 
 
 def _plan_playlist(
@@ -254,6 +344,109 @@ def _candidate_path_matches_manifest(
     except ValueError:
         return False
     return raw_path == str(relative_expected)
+
+
+def _playlist_report(
+    playlist: SpotifyPlaylist,
+    source: SourceConfig,
+    plan: PlaylistPlan,
+    *,
+    downloaded: int,
+    cleaned_up: int,
+    dry_run: bool,
+    action: str,
+    navidrome_playlist_id: str | None,
+) -> PlaylistReport:
+    return PlaylistReport(
+        spotify_playlist_id=playlist.spotify_id,
+        spotify_playlist_name=playlist.name,
+        spotify_tracks_total=playlist.total_tracks,
+        spotify_tracks_fetched=len(playlist.tracks),
+        navidrome_playlist_name=source.navidrome_playlist_name,
+        matched=plan.matched,
+        ambiguous=plan.ambiguous,
+        missing=plan.missing,
+        downloaded=downloaded,
+        cleaned_up=cleaned_up,
+        dry_run=dry_run,
+        action=action,
+        navidrome_playlist_id=navidrome_playlist_id,
+        diagnostics=tuple(_track_diagnostic(match) for match in plan.matches),
+    )
+
+
+def _track_diagnostic(match: TrackMatch) -> TrackDiagnostic:
+    song = match.matched_song
+    return TrackDiagnostic(
+        status=match.status,
+        title=match.spotify_track.name,
+        artists=match.spotify_track.artists,
+        spotify_id=match.spotify_track.spotify_id,
+        isrc=match.spotify_track.isrc,
+        navidrome_id=song.id if song is not None else None,
+        navidrome_title=song.title if song is not None else None,
+        navidrome_artist=song.artist if song is not None else None,
+    )
+
+
+def _count_cleanup_candidates(
+    manifest_entries: tuple[ManifestEntry, ...],
+    playlist: SpotifyPlaylist,
+) -> int:
+    keep_spotify_ids = {
+        track.spotify_id for track in playlist.tracks if track.spotify_id is not None
+    }
+    return sum(1 for entry in manifest_entries if entry.spotify_id not in keep_spotify_ids)
+
+
+def _print_report(report: RunReport) -> None:
+    print("spotify-navidrome-sync report")
+    print(f"mode: {'dry-run' if report.dry_run else 'sync'}")
+    print(f"playlists: {len(report.playlists)}")
+    for playlist in report.playlists:
+        print("")
+        print(f"playlist: {playlist.spotify_playlist_name} ({playlist.spotify_playlist_id})")
+        print(f"target: {playlist.navidrome_playlist_name}")
+        print(f"action: {playlist.action}")
+        if playlist.navidrome_playlist_id is not None:
+            print(f"navidrome_playlist_id: {playlist.navidrome_playlist_id}")
+        print(
+            "tracks: "
+            f"fetched={playlist.spotify_tracks_fetched} "
+            f"reported_total={playlist.spotify_tracks_total} "
+            f"matched={playlist.matched} "
+            f"missing={playlist.missing} "
+            f"ambiguous={playlist.ambiguous}"
+        )
+        download_label = "downloads_planned" if playlist.dry_run else "downloaded"
+        cleanup_label = "cleanup_planned" if playlist.dry_run else "cleaned_up"
+        print(f"{download_label}: {playlist.downloaded}")
+        print(f"{cleanup_label}: {playlist.cleaned_up}")
+        _print_track_diagnostics(playlist)
+
+
+def _print_track_diagnostics(report: PlaylistReport) -> None:
+    unresolved = tuple(
+        diagnostic for diagnostic in report.diagnostics if diagnostic.status != "matched"
+    )
+    if not unresolved:
+        print("unresolved_tracks: none")
+        return
+
+    print("unresolved_tracks:")
+    for diagnostic in unresolved:
+        print(
+            "  - "
+            f"status={diagnostic.status} "
+            f"spotify={_spotify_track_label(diagnostic)} "
+            f"spotify_id={diagnostic.spotify_id or '-'} "
+            f"isrc={diagnostic.isrc or '-'}"
+        )
+
+
+def _spotify_track_label(diagnostic: TrackDiagnostic) -> str:
+    artist = ", ".join(diagnostic.artists) if diagnostic.artists else "Unknown Artist"
+    return f"{artist} - {diagnostic.title}"
 
 
 def _scan(navidrome: NavidromeClient, *, runtime: RuntimeConfig, reason: str) -> None:

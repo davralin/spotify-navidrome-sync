@@ -37,6 +37,7 @@ class RuntimeConfig:
     download_root: Path = Path("/media")
     spotdl_bin: str = "spotdl"
     navidrome_scan_timeout_seconds: int = 900
+    dry_run: bool = False
 
 
 def load_app_config(path: str | Path) -> AppConfig:
@@ -85,9 +86,6 @@ def load_runtime_config(env: Mapping[str, str]) -> RuntimeConfig:
     if missing:
         raise ConfigError(f"missing required environment variables: {', '.join(missing)}")
 
-    if _env_true(env.get("DRY_RUN")):
-        raise ConfigError("DRY_RUN=true is not implemented yet")
-
     return RuntimeConfig(
         spotify_client_id=values["spotify_client_id"],
         spotify_client_secret=values["spotify_client_secret"],
@@ -102,6 +100,7 @@ def load_runtime_config(env: Mapping[str, str]) -> RuntimeConfig:
             default=900,
             name="NAVIDROME_SCAN_TIMEOUT_SECONDS",
         ),
+        dry_run=_env_true(env.get("DRY_RUN")),
     )
 
 

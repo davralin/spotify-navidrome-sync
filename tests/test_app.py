@@ -4,7 +4,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
-from spotify_navidrome_sync.app import _sync_playlist
+import pytest
+
+from spotify_navidrome_sync.app import RunReport, _print_report, _sync_playlist
 from spotify_navidrome_sync.config import RuntimeConfig, SourceConfig
 from spotify_navidrome_sync.downloader import SpotdlDownloader
 from spotify_navidrome_sync.manifest import ManifestEntry, load_manifest, write_manifest
@@ -130,7 +132,7 @@ def test_sync_playlist_downloads_scans_rematches_then_replaces_playlist(tmp_path
         ),
     )
 
-    _sync_playlist(
+    report = _sync_playlist(
         cast(NavidromeClient, navidrome),
         downloader,
         playlist,
@@ -152,6 +154,11 @@ def test_sync_playlist_downloads_scans_rematches_then_replaces_playlist(tmp_path
     assert [entry.spotify_id for entry in load_manifest(target)] == ["spotify-track"]
     assert (target / "Artist_-_Song_-_spotify-track.mp3").exists()
     assert not stale_path.exists()
+    assert report.action == "updated"
+    assert report.navidrome_playlist_id == "playlist-id"
+    assert report.matched == 1
+    assert report.downloaded == 1
+    assert report.cleaned_up == 1
 
 
 def test_sync_playlist_matches_downloaded_manifest_file_by_relative_path(tmp_path: Path) -> None:
@@ -214,3 +221,121 @@ def test_sync_playlist_matches_downloaded_manifest_file_by_relative_path(tmp_pat
 
     assert downloader.downloaded == ["spotify-track"]
     assert navidrome.replaced_song_ids == ("navidrome-song",)
+
+
+def test_sync_playlist_dry_run_plans_without_mutating(tmp_path: Path) -> None:
+    navidrome = FakeNavidrome()
+    downloader = FakeDownloader()
+    playlist = SpotifyPlaylist(
+        spotify_id="playlist-id",
+        name="Small",
+        total_tracks=1,
+        tracks=(
+            SpotifyTrack(
+                "Song",
+                ("Artist",),
+                120,
+                "NO1234567890",
+                "spotify-track",
+            ),
+        ),
+    )
+    source = SourceConfig(
+        spotify_playlist_id="playlist-id",
+        navidrome_playlist_name="Small Downloader Test",
+        download_missing=True,
+        download_target="small-test",
+        cleanup_downloads=True,
+    )
+    runtime = RuntimeConfig(
+        spotify_client_id="client-id",
+        spotify_client_secret="client-secret",
+        navidrome_url="https://navidrome.example.org",
+        navidrome_username="user",
+        navidrome_password="password",
+        download_root=tmp_path,
+        navidrome_scan_timeout_seconds=7,
+        dry_run=True,
+    )
+    target = tmp_path / "small-test"
+    target.mkdir()
+    stale_path = target / "Stale_-_Song_-_stale-track.mp3"
+    stale_path.write_text("stale", encoding="utf-8")
+    write_manifest(
+        target,
+        (
+            ManifestEntry(
+                "stale-track",
+                None,
+                "Stale",
+                "Song",
+                stale_path,
+            ),
+        ),
+    )
+
+    report = _sync_playlist(
+        cast(NavidromeClient, navidrome),
+        downloader,
+        playlist,
+        source,
+        runtime,
+    )
+
+    assert downloader.downloaded == []
+    assert navidrome.replaced_song_ids == ()
+    assert navidrome.events == ["search:Artist Song"]
+    assert stale_path.exists()
+    assert [entry.spotify_id for entry in load_manifest(target)] == ["stale-track"]
+    assert report.action == "dry-run"
+    assert report.navidrome_playlist_id is None
+    assert report.matched == 0
+    assert report.missing == 1
+    assert report.downloaded == 1
+    assert report.cleaned_up == 1
+    assert report.diagnostics[0].status == "missing"
+
+
+def test_print_report_includes_unresolved_track_diagnostics(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    navidrome = FakeNavidrome()
+    downloader = FakeDownloader()
+    playlist = SpotifyPlaylist(
+        spotify_id="playlist-id",
+        name="Small",
+        total_tracks=1,
+        tracks=(SpotifyTrack("Song", ("Artist",), 120, "NO1234567890", "spotify-track"),),
+    )
+    source = SourceConfig(
+        spotify_playlist_id="playlist-id",
+        navidrome_playlist_name="Small Downloader Test",
+    )
+    runtime = RuntimeConfig(
+        spotify_client_id="client-id",
+        spotify_client_secret="client-secret",
+        navidrome_url="https://navidrome.example.org",
+        navidrome_username="user",
+        navidrome_password="password",
+        dry_run=True,
+    )
+    report = _sync_playlist(
+        cast(NavidromeClient, navidrome),
+        downloader,
+        playlist,
+        source,
+        runtime,
+    )
+
+    _print_report(RunReport(dry_run=True, playlists=(report,)))
+
+    captured = capsys.readouterr()
+    assert "spotify-navidrome-sync report" in captured.out
+    assert "mode: dry-run" in captured.out
+    assert "playlist: Small (playlist-id)" in captured.out
+    assert "tracks: fetched=1 reported_total=1 matched=0 missing=1 ambiguous=0" in captured.out
+    assert "downloads_planned: 0" in captured.out
+    assert (
+        "status=missing spotify=Artist - Song spotify_id=spotify-track isrc=NO1234567890"
+        in captured.out
+    )
