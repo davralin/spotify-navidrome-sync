@@ -23,6 +23,17 @@ class TrackMatch:
         return "missing"
 
 
+@dataclass(frozen=True)
+class CandidateRejection:
+    navidrome_id: str
+    title: str
+    artist: str
+    duration_seconds: int | None
+    suffix: str | None
+    path: str | None
+    reasons: tuple[str, ...]
+
+
 def match_track(track: SpotifyTrack, candidates: tuple[NavidromeSong, ...]) -> TrackMatch:
     candidates = tuple(candidate for candidate in candidates if candidate.id)
 
@@ -47,6 +58,19 @@ def match_track(track: SpotifyTrack, candidates: tuple[NavidromeSong, ...]) -> T
         return TrackMatch(spotify_track=track, matched_song=selected)
 
     return TrackMatch(spotify_track=track, matched_song=None)
+
+
+def explain_rejections(
+    track: SpotifyTrack,
+    candidates: tuple[NavidromeSong, ...],
+    *,
+    limit: int = 3,
+) -> tuple[CandidateRejection, ...]:
+    ranked = sorted(
+        (_candidate_rejection(track, candidate) for candidate in candidates),
+        key=_rejection_key,
+    )
+    return tuple(ranked[:limit])
 
 
 def search_query(track: SpotifyTrack) -> str:
@@ -96,3 +120,57 @@ def _duration_close(left: int | None, right: int | None) -> bool:
     if left is None or right is None:
         return True
     return abs(left - right) <= 12
+
+
+def _candidate_rejection(track: SpotifyTrack, candidate: NavidromeSong) -> CandidateRejection:
+    normalized_title = normalize(track.name)
+    normalized_artists = {normalize(artist) for artist in track.artists}
+    candidate_title = normalize(candidate.title)
+    candidate_artist = normalize(candidate.artist)
+
+    reasons: list[str] = []
+    if not candidate.id:
+        reasons.append("missing_navidrome_id")
+    if track.isrc and track.isrc not in candidate.isrcs:
+        reasons.append("isrc_mismatch")
+    if not _title_compatible(candidate_title, normalized_title):
+        reasons.append("title_mismatch")
+    if not _artist_compatible(candidate_artist, normalized_artists):
+        reasons.append("artist_mismatch")
+    if not _duration_close(track.duration_seconds, candidate.duration_seconds):
+        reasons.append("duration_mismatch")
+
+    return CandidateRejection(
+        navidrome_id=candidate.id,
+        title=candidate.title,
+        artist=candidate.artist,
+        duration_seconds=candidate.duration_seconds,
+        suffix=candidate.suffix,
+        path=_candidate_path(candidate),
+        reasons=tuple(reasons) or ("unknown_rejection",),
+    )
+
+
+def _rejection_key(rejection: CandidateRejection) -> tuple[int, int, str, str]:
+    reason_weight = sum(
+        {
+            "missing_navidrome_id": 4,
+            "title_mismatch": 3,
+            "artist_mismatch": 3,
+            "duration_mismatch": 2,
+            "isrc_mismatch": 1,
+            "unknown_rejection": 5,
+        }.get(reason, 5)
+        for reason in rejection.reasons
+    )
+    return (
+        len(rejection.reasons),
+        reason_weight,
+        rejection.artist.casefold(),
+        rejection.title.casefold(),
+    )
+
+
+def _candidate_path(candidate: NavidromeSong) -> str | None:
+    raw_path = candidate.raw.get("path")
+    return raw_path if isinstance(raw_path, str) else None

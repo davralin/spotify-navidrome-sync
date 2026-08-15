@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from spotify_navidrome_sync.matching import match_track, normalize
+from spotify_navidrome_sync.matching import explain_rejections, match_track, normalize
 from spotify_navidrome_sync.navidrome import NavidromeSong
 from spotify_navidrome_sync.spotify import SpotifyTrack
 
@@ -168,3 +168,34 @@ def test_match_track_accepts_safe_title_suffix_for_strong_artist_duration_match(
 
     assert result.status == "matched"
     assert result.matched_song == song
+
+
+def test_explain_rejections_reports_candidate_reasons() -> None:
+    track = SpotifyTrack(
+        name="Song",
+        artists=("Artist",),
+        duration_seconds=120,
+        isrc="NO1234567890",
+        spotify_id="spotify-track",
+    )
+    song = NavidromeSong(
+        "one",
+        "Other Song",
+        "Different Performer",
+        160,
+        "mp3",
+        ("DIFFERENT",),
+        {"path": "Artist/Album/01 - Other Song.mp3"},
+    )
+
+    rejections = explain_rejections(track, (song,))
+
+    assert len(rejections) == 1
+    assert rejections[0].navidrome_id == "one"
+    assert rejections[0].reasons == (
+        "isrc_mismatch",
+        "title_mismatch",
+        "artist_mismatch",
+        "duration_mismatch",
+    )
+    assert rejections[0].path == "Artist/Album/01 - Other Song.mp3"

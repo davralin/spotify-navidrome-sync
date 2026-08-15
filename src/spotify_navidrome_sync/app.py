@@ -24,7 +24,13 @@ from spotify_navidrome_sync.manifest import (
     merge_manifest_entries,
     write_manifest,
 )
-from spotify_navidrome_sync.matching import TrackMatch, match_track, search_query
+from spotify_navidrome_sync.matching import (
+    CandidateRejection,
+    TrackMatch,
+    explain_rejections,
+    match_track,
+    search_query,
+)
 from spotify_navidrome_sync.media_paths import (
     filter_stale_rip_candidates,
     rip_song_path,
@@ -44,6 +50,7 @@ LOGGER = logging.getLogger("spotify_navidrome_sync")
 @dataclass(frozen=True)
 class PlaylistPlan:
     matches: tuple[TrackMatch, ...]
+    diagnostics: tuple[TrackDiagnostic, ...]
     song_ids: tuple[str, ...]
     missing_tracks: tuple[SpotifyTrack, ...]
     matched: int
@@ -61,6 +68,10 @@ class TrackDiagnostic:
     navidrome_id: str | None = None
     navidrome_title: str | None = None
     navidrome_artist: str | None = None
+    candidates_found: int = 0
+    stale_candidates_filtered: int = 0
+    rejection_reasons: tuple[str, ...] = ()
+    rejected_candidates: tuple[CandidateRejection, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -260,6 +271,7 @@ def _plan_playlist(
 ) -> PlaylistPlan:
     song_ids: list[str] = []
     matches: list[TrackMatch] = []
+    diagnostics: list[TrackDiagnostic] = []
     missing_tracks: list[SpotifyTrack] = []
     matched = 0
     ambiguous = 0
@@ -270,10 +282,11 @@ def _plan_playlist(
     }
 
     for track in playlist.tracks:
+        raw_candidates = navidrome.search_songs(search_query(track))
         candidates = filter_stale_rip_candidates(
-            navidrome.search_songs(search_query(track)),
-            download_root=runtime.download_root,
+            raw_candidates, download_root=runtime.download_root
         )
+        stale_candidates_filtered = len(raw_candidates) - len(candidates)
         result = _match_manifest_entry(
             track,
             manifest_by_spotify_id.get(track.spotify_id or ""),
@@ -281,6 +294,16 @@ def _plan_playlist(
             runtime=runtime,
         ) or match_track(track, candidates)
         matches.append(result)
+        diagnostics.append(
+            _track_diagnostic(
+                result,
+                candidates_found=len(raw_candidates),
+                stale_candidates_filtered=stale_candidates_filtered,
+                rejected_candidates=explain_rejections(track, candidates)
+                if result.matched_song is None
+                else (),
+            )
+        )
         if result.matched_song is not None:
             matched += 1
             song_ids.append(result.matched_song.id)
@@ -300,6 +323,7 @@ def _plan_playlist(
 
     return PlaylistPlan(
         matches=tuple(matches),
+        diagnostics=tuple(diagnostics),
         song_ids=tuple(song_ids),
         missing_tracks=tuple(missing_tracks),
         matched=matched,
@@ -371,12 +395,21 @@ def _playlist_report(
         dry_run=dry_run,
         action=action,
         navidrome_playlist_id=navidrome_playlist_id,
-        diagnostics=tuple(_track_diagnostic(match) for match in plan.matches),
+        diagnostics=plan.diagnostics,
     )
 
 
-def _track_diagnostic(match: TrackMatch) -> TrackDiagnostic:
+def _track_diagnostic(
+    match: TrackMatch,
+    *,
+    candidates_found: int,
+    stale_candidates_filtered: int,
+    rejected_candidates: tuple[CandidateRejection, ...],
+) -> TrackDiagnostic:
     song = match.matched_song
+    rejection_reasons = tuple(
+        dict.fromkeys(reason for candidate in rejected_candidates for reason in candidate.reasons)
+    )
     return TrackDiagnostic(
         status=match.status,
         title=match.spotify_track.name,
@@ -386,6 +419,10 @@ def _track_diagnostic(match: TrackMatch) -> TrackDiagnostic:
         navidrome_id=song.id if song is not None else None,
         navidrome_title=song.title if song is not None else None,
         navidrome_artist=song.artist if song is not None else None,
+        candidates_found=candidates_found,
+        stale_candidates_filtered=stale_candidates_filtered,
+        rejection_reasons=rejection_reasons,
+        rejected_candidates=rejected_candidates,
     )
 
 
@@ -440,13 +477,41 @@ def _print_track_diagnostics(report: PlaylistReport) -> None:
             f"status={diagnostic.status} "
             f"spotify={_spotify_track_label(diagnostic)} "
             f"spotify_id={diagnostic.spotify_id or '-'} "
-            f"isrc={diagnostic.isrc or '-'}"
+            f"isrc={diagnostic.isrc or '-'} "
+            f"candidates={diagnostic.candidates_found} "
+            f"stale_filtered={diagnostic.stale_candidates_filtered} "
+            f"reasons={_rejection_reasons_label(diagnostic)}"
         )
+        for candidate in diagnostic.rejected_candidates:
+            print(f"    rejected: {_candidate_rejection_label(candidate)}")
 
 
 def _spotify_track_label(diagnostic: TrackDiagnostic) -> str:
     artist = ", ".join(diagnostic.artists) if diagnostic.artists else "Unknown Artist"
     return f"{artist} - {diagnostic.title}"
+
+
+def _rejection_reasons_label(diagnostic: TrackDiagnostic) -> str:
+    if diagnostic.candidates_found == 0:
+        return "no_candidates"
+    if not diagnostic.rejection_reasons:
+        return "none"
+    return ",".join(diagnostic.rejection_reasons)
+
+
+def _candidate_rejection_label(candidate: CandidateRejection) -> str:
+    path = candidate.path or "-"
+    duration = str(candidate.duration_seconds) if candidate.duration_seconds is not None else "-"
+    suffix = candidate.suffix or "-"
+    return (
+        f"navidrome_id={candidate.navidrome_id or '-'} "
+        f"artist={candidate.artist or '-'} "
+        f"title={candidate.title or '-'} "
+        f"duration={duration} "
+        f"suffix={suffix} "
+        f"reasons={','.join(candidate.reasons)} "
+        f"path={path}"
+    )
 
 
 def _scan(navidrome: NavidromeClient, *, runtime: RuntimeConfig, reason: str) -> None:

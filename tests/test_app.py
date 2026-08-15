@@ -299,7 +299,22 @@ def test_sync_playlist_dry_run_plans_without_mutating(tmp_path: Path) -> None:
 def test_print_report_includes_unresolved_track_diagnostics(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    navidrome = FakeNavidrome()
+    class RejectedCandidateNavidrome(FakeNavidrome):
+        def search_songs(self, query: str, *, count: int = 10) -> tuple[NavidromeSong, ...]:
+            self.events.append(f"search:{query}")
+            return (
+                NavidromeSong(
+                    "candidate-id",
+                    "Other Song",
+                    "Different Performer",
+                    160,
+                    "mp3",
+                    ("DIFFERENT",),
+                    {"path": "Artist/Album/01 - Other Song.mp3"},
+                ),
+            )
+
+    navidrome = RejectedCandidateNavidrome()
     downloader = FakeDownloader()
     playlist = SpotifyPlaylist(
         spotify_id="playlist-id",
@@ -336,6 +351,50 @@ def test_print_report_includes_unresolved_track_diagnostics(
     assert "tracks: fetched=1 reported_total=1 matched=0 missing=1 ambiguous=0" in captured.out
     assert "downloads_planned: 0" in captured.out
     assert (
-        "status=missing spotify=Artist - Song spotify_id=spotify-track isrc=NO1234567890"
+        "status=missing spotify=Artist - Song spotify_id=spotify-track isrc=NO1234567890 "
+        "candidates=1 stale_filtered=0 "
+        "reasons=isrc_mismatch,title_mismatch,artist_mismatch,duration_mismatch" in captured.out
+    )
+    assert (
+        "rejected: navidrome_id=candidate-id artist=Different Performer title=Other Song"
         in captured.out
     )
+    assert "path=Artist/Album/01 - Other Song.mp3" in captured.out
+
+
+def test_print_report_marks_missing_tracks_with_no_candidates(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    navidrome = FakeNavidrome()
+    downloader = FakeDownloader()
+    playlist = SpotifyPlaylist(
+        spotify_id="playlist-id",
+        name="Small",
+        total_tracks=1,
+        tracks=(SpotifyTrack("Song", ("Artist",), 120, "NO1234567890", "spotify-track"),),
+    )
+    source = SourceConfig(
+        spotify_playlist_id="playlist-id",
+        navidrome_playlist_name="Small Downloader Test",
+    )
+    runtime = RuntimeConfig(
+        spotify_client_id="client-id",
+        spotify_client_secret="client-secret",
+        navidrome_url="https://navidrome.example.org",
+        navidrome_username="user",
+        navidrome_password="password",
+        dry_run=True,
+    )
+    report = _sync_playlist(
+        cast(NavidromeClient, navidrome),
+        downloader,
+        playlist,
+        source,
+        runtime,
+    )
+
+    _print_report(RunReport(dry_run=True, playlists=(report,)))
+
+    captured = capsys.readouterr()
+    assert "candidates=0 stale_filtered=0 reasons=no_candidates" in captured.out
+    assert "rejected:" not in captured.out
