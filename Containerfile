@@ -2,7 +2,7 @@
 
 FROM ghcr.io/astral-sh/uv:0.12.6@sha256:88bc6eb1ccd4b82efd0e1b530caffabddf50dc2bf612e66c14ea25b8ee8a4d3d AS uv
 
-FROM python:3.14-slim@sha256:83ff1d245a3d57d04152252d3ef9cb361494d0b3395abd65a5ebe91c401c8e83
+FROM python:3.14-slim@sha256:cae66f2ef0ec51a9891263eeee7f987dacf0a9879e8aa9353d5606e0530619a5
 
 LABEL org.opencontainers.image.title="spotify-navidrome-sync"
 LABEL org.opencontainers.image.description="One-shot Spotify playlist to Navidrome playlist sync job"
