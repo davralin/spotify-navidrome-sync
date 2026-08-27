@@ -12,6 +12,8 @@
   dependencyDashboardTitle: 'Renovate Dashboard',
   rebaseWhen: 'conflicted',
   automergeStrategy: 'rebase',
+  timezone: 'Europe/Oslo',
+  schedule: ['after 21:00 on friday and before 06:00 on saturday'],
 
   lockFileMaintenance: {
     enabled: true,
